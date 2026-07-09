@@ -10,6 +10,14 @@ status: draft
 
 Prouver que la mise à jour d'Artifactory n'a **pas** dégradé la chaîne de protection Nexus IQ Firewall ni la résolution de dépendances. Le test critique : un composant en violation de policy doit **toujours** être mis en quarantaine et **ne jamais** être servi par Artifactory.
 
+## Contexte : serveur peu utilisé
+
+Ce serveur est faiblement sollicité (**2 composants bloqués en 1 an**). Conséquence directe sur la stratégie de recette :
+
+- Les tests de base (résolution nominale) ont déjà été faits et passent. **Mais ils ne prouvent pas que le blocage fonctionne** : le chemin de quarantaine est justement celui qu'un serveur peu utilisé n'exerce presque jamais, donc le plus susceptible de casser en silence.
+- « Ça résout, donc ça marche » est **faux** ici. Il faut **au moins un blocage observé après la MàJ** pour valider.
+- Deux leviers de test actif remplacent le trafic organique : (a) **rejouer les 2 composants réellement bloqués** cette année, (b) **provoquer une quarantaine neuve** avec un composant canary jamais résolu. Voir Tests 5 et 6 ci-dessous.
+
 ## Architecture testée
 
 ```
@@ -34,14 +42,16 @@ Les 4 points de rupture possibles après une MàJ Artifactory :
 - [ ] Vérifier l'accès aux 3 dépôts remote proxifiés : `maven-remote`, `npm-remote`, `pypi-remote` (adapter aux noms réels).
 - [ ] Disposer d'un compte technique / token Artifactory pour les tests.
 - [ ] Avoir un accès lecture à la console Nexus IQ (dashboard Firewall / reports).
-- [ ] Choisir, **par écosystème**, deux composants de référence :
-  - un composant **sain** (conforme à la policy),
-  - un composant **en violation connue** (attendu : quarantaine).
+- [ ] **Retrouver les 2 composants réellement bloqués cette année** (console IQ → Firewall → historique quarantaine). Noter leur coordonnées exactes (écosystème, nom, version). Ce sont tes cas de test prioritaires, alignés sur ta vraie policy.
+- [ ] Choisir **1 composant sain** par écosystème utilisé (conforme, pour valider le chemin nominal).
+- [ ] Choisir **1 composant canary** en violation, **jamais résolu** chez toi, que la policy bloquera (pour un test de quarantaine « neuf » de bout en bout).
 
-> Exemples illustratifs de composants « en violation » fréquemment quarantinés (à valider contre TA policy) :
+> Composant réellement bloqué = meilleur cas de test (réel, aligné policy). Canary = filet de sécurité si les 2 composants connus sont déjà en cache (leur re-demande ne repasserait pas par le Firewall).
+>
+> Exemples de canary (à valider contre TA policy) :
 > - Maven : `org.apache.logging.log4j:log4j-core:2.14.1` (Log4Shell, CVE-2021-44228)
 > - npm : `event-stream@3.3.6` (incident malware historique)
-> - PyPI : une version de paquet avec CVE critique connue (ex. `pyyaml==5.3.1`, CVE-2020-14343)
+> - PyPI : `pyyaml==5.3.1` (CVE-2020-14343)
 
 Variables utilisées dans les commandes ci-dessous :
 
@@ -59,14 +69,12 @@ TOKEN=xxxxxxxx        # token Artifactory
 | # | Test | Attendu | Obtenu | OK ? |
 |---|------|---------|--------|------|
 | 1 | Config & connectivité Artifactory ↔ Firewall | 200 / composant caché servi | | ☐ |
-| 2 | Composant sain non caché (Maven) | Servi + caché, requête visible dans Firewall | | ☐ |
-| 3 | Composant sain non caché (npm) | idem | | ☐ |
-| 4 | Composant sain non caché (PyPI) | idem | | ☐ |
-| 5 | **Quarantaine (Maven)** | **Bloqué (403/409), quarantaine visible dans IQ** | | ☐ |
-| 6 | **Quarantaine (npm)** | **Bloqué** | | ☐ |
-| 7 | **Quarantaine (PyPI)** | **Bloqué** | | ☐ |
-| 8 | Non-régression cache (composant déjà quarantiné reste bloqué) | Toujours bloqué | | ☐ |
-| 9 | End-to-end GitLab CI (build + éval Nexus IQ) | Report identique au baseline | | ☐ |
+| 2 | Composant sain non caché (1 par écosystème utilisé) | Servi + caché, requête visible dans Firewall | | ☐ |
+| 3 | **Rejeu des 2 composants réellement bloqués** | **Toujours bloqués + quarantaine visible dans IQ** | | ☐ |
+| 4 | **Quarantaine « neuve » avec canary jamais résolu** | **Intercepté à la volée, bloqué, quarantaine dans IQ** | | ☐ |
+| 5 | End-to-end GitLab CI (build + éval Nexus IQ) | Report identique au baseline | | ☐ |
+
+> Tests 3 et 4 = cœur de la recette sur ce serveur peu utilisé. Le Test 4 est **le minimum vital** : c'est le seul qui exerce le chemin complet Artifactory → Firewall → évaluation → blocage.
 
 ---
 
@@ -108,9 +116,9 @@ Vérifie aussi le TLS si mTLS : `curl -v` doit négocier le handshake vers l'amo
 
 ---
 
-### Test 2/3/4 — Composant sain non caché (chemin nominal)
+### Test 2 — Composant sain non caché (chemin nominal)
 
-L'objectif : le composant transite par le Firewall, est évalué conforme, servi puis caché. **Vérifie ensuite dans Nexus IQ que la requête est bien tracée** (dashboard Firewall → « Component requests »).
+L'objectif : le composant transite par le Firewall, est évalué conforme, servi puis caché. **Vérifie ensuite dans Nexus IQ que la requête est bien tracée** (dashboard Firewall → « Component requests »). Un seul écosystème suffit si le temps manque, mais idéalement un composant sain par techno réellement utilisée.
 
 **Maven / Gradle**
 
@@ -151,64 +159,63 @@ pip download requests==2.32.3 --no-deps \
 
 ---
 
-### Test 5/6/7 — Quarantaine (LE test critique)
+### Test 3 — Rejeu des 2 composants réellement bloqués (non-régression réelle)
 
-Même commandes que ci-dessus, mais avec un composant **en violation** et **non caché**. Attendu : la commande **échoue** (403/409/404), et la quarantaine apparaît dans Nexus IQ.
-
-**Maven**
+Reprends les 2 composants quarantinés cette année et redemande-les via Artifactory, chacun avec la commande de son écosystème. Attendu : **toujours bloqués**. Ce test prouve d'un coup que la quarantaine tient **et** que le cache n'a pas « débloqué » un composant lors de la MàJ.
 
 ```bash
-# S'assurer qu'il n'est pas caché (cf. purge plus haut), puis :
-mvn dependency:get \
-  -Dartifact=org.apache.logging.log4j:log4j-core:2.14.1 \
+# Exemple Maven (adapter au type réel de chaque composant bloqué)
+mvn dependency:get -Dartifact=<groupe:artefact:version-bloquée> \
   -DremoteRepositories=art::::$ARTIFACTORY/maven-remote -s settings.xml
-# Attendu : ECHEC de résolution (composant quarantiné par le Firewall)
+# Attendu : ECHEC de résolution
+
+# Exemple npm
+npm pack <paquet-bloqué>@<version> --userconfig ./.npmrc      # Attendu : échec
+
+# Exemple PyPI
+pip download <paquet-bloqué>==<version> --no-deps \
+  --index-url "https://$USER:$TOKEN@artifactory.mon-entreprise.com/artifactory/api/pypi/pypi-remote/simple/" \
+  -d ./tmp-pip                                                 # Attendu : échec
 ```
 
-**npm**
+> Limite : si ces composants sont déjà en cache Artifactory, leur re-demande peut être servie/refusée **sans** re-solliciter le Firewall. Ce test valide donc surtout la persistance de la quarantaine côté Artifactory. Pour exercer le Firewall lui-même, enchaîne avec le Test 4.
+
+### Test 4 — Quarantaine « neuve » avec un canary (LE test critique)
+
+Le seul test qui exerce le chemin complet **Artifactory → Firewall → évaluation → blocage**. Prends un composant en violation **jamais résolu** chez toi (sinon purge-le du cache, cf. astuce plus haut).
 
 ```bash
-npm pack event-stream@3.3.6 --userconfig ./.npmrc
-# Attendu : échec (403/404)
-```
+# Maven
+mvn dependency:get -Dartifact=org.apache.logging.log4j:log4j-core:2.14.1 \
+  -DremoteRepositories=art::::$ARTIFACTORY/maven-remote -s settings.xml
+# Attendu : ECHEC + composant intercepté et quarantiné par le Firewall
 
-**PyPI**
+# ou npm
+npm pack event-stream@3.3.6 --userconfig ./.npmrc            # Attendu : échec
 
-```bash
+# ou PyPI
 pip download pyyaml==5.3.1 --no-deps \
   --index-url "https://$USER:$TOKEN@artifactory.mon-entreprise.com/artifactory/api/pypi/pypi-remote/simple/" \
-  -d ./tmp-pip
-# Attendu : échec
+  -d ./tmp-pip                                                # Attendu : échec
 ```
 
-**Vérification côté Nexus IQ** — la quarantaine doit être visible :
+**Vérification côté Nexus IQ** — la quarantaine doit être visible pour les Tests 3 et 4 :
 
 - Console IQ → **Firewall** → composant listé comme *Quarantined*.
-- Ou via l'API REST Firewall (composants en quarantaine) :
+- Ou via l'API REST Firewall :
 
 ```bash
 curl -s -u "$USER:$TOKEN" \
   "$IQ_SERVER/api/v2/firewall/quarantine?repositoryId=<id-repo-firewall>" | jq .
 ```
 
-> ⚠️ Si un composant en violation est **servi malgré tout** (200 + fichier récupéré), c'est un **échec bloquant** de la recette : la MàJ a cassé le chemin de quarantaine. Ne pas mettre en production.
+> ⚠️ Si un composant en violation est **servi malgré tout** (200 + fichier récupéré), c'est un **échec bloquant** : la MàJ a cassé le chemin de quarantaine. Ne pas mettre en production.
+
+En parallèle, vérifie qu'un composant sain déjà caché reste servi normalement (Test 1) sans latence anormale.
 
 ---
 
-### Test 8 — Non-régression du cache
-
-```bash
-# Un composant DEJA quarantiné avant la MàJ doit rester bloqué
-mvn dependency:get -Dartifact=<composant-deja-quarantine> \
-  -DremoteRepositories=art::::$ARTIFACTORY/maven-remote -s settings.xml
-# Attendu : toujours ECHEC (pas de "déblocage" par reset de cache)
-```
-
-Vérifier en parallèle qu'un composant sain déjà caché reste servi normalement (Test 1) sans latence anormale.
-
----
-
-### Test 9 — End-to-end GitLab CI
+### Test 5 — End-to-end GitLab CI
 
 Rejouer un vrai job qui résout ses dépendances depuis Artifactory puis évalue avec Nexus IQ, et **comparer au baseline pris avant la MàJ** (mêmes composants, mêmes violations, même verdict de policy).
 
@@ -259,12 +266,12 @@ Un écart de composants résolus ou de violations détectées = régression à i
 
 **GO** si, et seulement si :
 
-- Tests 1–4 OK (résolution nominale fonctionnelle),
-- Tests 5–7 OK = **tous les composants en violation sont bloqués** et quarantinés dans Nexus IQ,
-- Test 8 OK (pas de déblocage par le cache),
-- Test 9 : report CI identique au baseline.
+- Tests 1–2 OK (résolution nominale fonctionnelle),
+- Test 3 OK = les 2 composants réellement bloqués le restent (non-régression du cache),
+- **Test 4 OK = le canary est intercepté et quarantiné à la volée** (chemin Firewall complet validé) — condition impérative,
+- Test 5 : report CI identique au baseline.
 
-**NO-GO** (bloquant) si un composant en violation est servi par Artifactory, ou si la quarantaine n'apparaît plus dans Nexus IQ après la MàJ.
+**NO-GO** (bloquant) si le canary (Test 4) est servi par Artifactory, si un composant en violation n'apparaît plus en quarantaine dans Nexus IQ, ou si le Test 4 n'a pas pu être exécuté (aucun blocage observé après la MàJ = recette non concluante sur ce serveur peu utilisé).
 
 ---
 
