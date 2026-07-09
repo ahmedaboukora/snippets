@@ -129,6 +129,44 @@ curl -s -u "$USER:$TOKEN" \
 
 ---
 
+## Dépannage auth (erreur 401 sur `npm pack`)
+
+Un 401 = problème d'**authentification** (pas un blocage Firewall, qui renvoie un 403). npm n'envoie pas de credentials valides à Artifactory. Vérifier dans l'ordre :
+
+**1. Le token est-il bon ?** (isole auth vs `.npmrc`)
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -u "$USER:$TOKEN" "$ARTIFACTORY/api/npm/npm-remote/"
+# 401 -> token invalide/expiré ou sans droit de lecture sur le repo
+# 200 -> le problème est dans le .npmrc (voir points 2 et 3)
+```
+
+**2. Récupérer le `.npmrc` exact généré par Artifactory** (méthode la plus fiable)
+
+```bash
+curl -s -u "$USER:$TOKEN" "$ARTIFACTORY/api/npm/auth"
+# renvoie _auth=..., always-auth=true, email=... -> coller tel quel dans .npmrc
+```
+
+(ou UI JFrog → repo npm → **Set Me Up**, qui génère le `.npmrc` complet.)
+
+**3. Deux pièges fréquents dans le `.npmrc` :**
+
+- Ajouter `always-auth=true` : sans ça, les vieux npm n'envoient pas l'auth sur le GET du tarball (ce que fait `npm pack`) → 401.
+- La ligne de scope doit correspondre **exactement** à l'URL du registry (host + chemin + slash final), **sans `https:`** dans la clé :
+
+```
+registry=https://artifactory.mon-entreprise.com/artifactory/api/npm/npm-remote/
+//artifactory.mon-entreprise.com/artifactory/api/npm/npm-remote/:_authToken=TON_TOKEN
+always-auth=true
+```
+
+Le moindre écart (slash manquant, mauvais nom de repo) empêche npm d'associer le token à l'URL → 401.
+
+> `_authToken` attend un **access token** Artifactory (JWT). Pour une API key ou un mot de passe, utiliser la méthode `_auth` (base64 `user:password`) — ne pas mélanger les deux.
+
+---
+
 ## Notes
 
 - Adapter le nom du repo (`npm-remote`), l'URL et le token.
